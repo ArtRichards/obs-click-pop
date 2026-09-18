@@ -119,3 +119,34 @@ def test_map_coords_retina_prescaled(x, y, canvas_w, canvas_h,
     """Verify map_coords works when coords are pre-scaled to physical pixels."""
     result = map_coords(x, y, canvas_w, canvas_h, monitor_w, monitor_h, size)
     assert result == pytest.approx(expected, abs=1.0)
+
+
+@pytest.mark.parametrize(
+    "transform, expected_center",
+    [
+        ((1, 0, 0, 1, 0, 0), (100, 200)),
+        ((0.5, 0, 0, 0.5, 100, 50), (150, 150)),
+        ((0, -1, 1, 0, 1000, 0), (800, 100)),
+        ((-1, 0, 0, 1, 1920, 0), (1820, 200)),
+        ((2, 0, 0, 0.5, -10, 30), (190, 130)),
+    ],
+    ids=["identity", "scaled_group", "rotation", "flip", "nonuniform_scale"],
+)
+def test_map_coords_uses_full_capture_transform(transform, expected_center):
+    result = map_coords(
+        100, 200, 1920, 1080, 1920, 1080, 60,
+        capture_transform=transform,
+    )
+    assert result == pytest.approx((expected_center[0] - 30,
+                                    expected_center[1] - 30))
+
+
+def test_source_crop_precedes_transform_and_circle_centering_follows_it():
+    result = map_coords(
+        300, 300, 1920, 1080, 1920, 1080, 60,
+        crop_left=200, crop_top=100,
+        capture_transform=(0, -0.5, 0.5, 0, 1000, 50),
+    )
+    # (300,300) -> crop (100,200) -> rotate/scale/translate (900,100).
+    # The 60px indicator remains centered in canvas space, not source space.
+    assert result == pytest.approx((870, 70))

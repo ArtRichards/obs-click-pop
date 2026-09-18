@@ -198,16 +198,47 @@ def _detect_displays_win32():
 
 
 def _detect_displays_linux():
-    """Enumerate displays on Linux via xrandr."""
+    """Enumerate active RandR monitors using OBS XSHM's screen numbering.
+
+    RandR 1.5's active-monitor list can differ from the connector order in
+    ``xrandr --query``.  Preserve the explicit monitor number as ``obs_screen``
+    so a fallback display descriptor cannot accidentally match screen zero.
+    Older xrandr/RandR versions without this list leave automatic matching
+    unavailable; guessing connector indices would select the wrong display.
+    """
     import subprocess, re
-    out = subprocess.check_output(["xrandr", "--query"], text=True, timeout=5)
+    try:
+        out = subprocess.check_output(
+            ["xrandr", "--listactivemonitors"], text=True, timeout=5,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        obs.script_log(obs.LOG_WARNING,
+                       f"Click Pop: active RandR monitor detection failed: {exc}; "
+                       "automatic display matching is unavailable")
+        return []
+
+    header = re.search(r"^Monitors:\s*(\d+)\s*$", out, re.MULTILINE)
     displays = []
-    idx = 0
-    for m in re.finditer(r"(\d+)x(\d+)\+(\d+)\+(\d+)", out):
-        w, h, x, y = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
-        displays.append({"id": idx, "x": x, "y": y, "w": w, "h": h,
-                          "retina_scale": 1.0})
-        idx += 1
+    pattern = re.compile(
+        r"^\s*(\d+):\s+.+?\s+(\d+)/\d+x(\d+)/\d+([+-]\d+)([+-]\d+)(?:\s.*)?$"
+    )
+    for line in out.splitlines():
+        match = pattern.match(line)
+        if match is None:
+            continue
+        screen, w, h, x, y = map(int, match.groups())
+        if w > 0 and h > 0:
+            displays.append({"id": screen, "obs_screen": screen,
+                             "x": x, "y": y, "w": w, "h": h,
+                             "retina_scale": 1.0})
+
+    if (header is None or int(header.group(1)) != len(displays)
+            or len({d["obs_screen"] for d in displays}) != len(displays)):
+        obs.script_log(obs.LOG_WARNING,
+                       "Click Pop: invalid active RandR monitor list; "
+                       "automatic display matching is unavailable")
+        return []
     return displays
 
 
@@ -441,10 +472,15 @@ def _refresh_displays():
                        f"Click Pop: captured display: "
                        f"{_captured_display['w']}x{_captured_display['h']} "
                        f"@ ({_captured_display['x']},{_captured_display['y']})")
+    elif _settings.get("capture_source", "") not in ("", "(none)"):
+        obs.script_log(obs.LOG_WARNING,
+                       "Click Pop: selected capture's monitor could not be "
+                       "resolved; indicators will be skipped. Check the "
+                       "capture selection and Refresh Displays.")
     else:
         obs.script_log(obs.LOG_INFO,
-                       "Click Pop: no captured display resolved — "
-                       "clicks on all displays will show circles")
+                       "Click Pop: no capture selected — clicks use "
+                       "per-monitor full-canvas mapping")
 
 
 def _on_refresh_displays(props, prop):
@@ -538,30 +574,57 @@ def _iter_display_capture_names():
     """
     import json
     scene_src = obs.obs_frontend_get_current_scene()
-    scene = obs.obs_scene_from_source(scene_src)
-    obs.obs_source_release(scene_src)
-    if scene is None:
+    if scene_src is None:
         return
+    try:
+        scene = obs.obs_scene_from_source(scene_src)
+        if scene is None:
+            return
+        data = obs.obs_scene_save_transform_states(scene, True)
+        try:
+            json_str = obs.obs_data_get_json(data)
+        finally:
+            obs.obs_data_release(data)
+        if not json_str:
+            return
 
-    data = obs.obs_scene_save_transform_states(scene, True)
-    json_str = obs.obs_data_get_json(data)
-    obs.obs_data_release(data)
-    if not json_str:
-        return
+        parsed = json.loads(json_str)
+        seen = set()
+        for scene_info in parsed.get("scenes_and_groups", []):
+            group_source = None
+            try:
+                item_scene = scene
+                if scene_info.get("is_group"):
+                    group_name = scene_info.get("scene_name")
+                    if not group_name:
+                        continue
+                    group_source = obs.obs_get_source_by_name(group_name)
+                    if group_source is None:
+                        continue
+                    item_scene = obs.obs_group_from_source(group_source)
+                    if item_scene is None:
+                        continue
 
-    parsed = json.loads(json_str)
-    for scene_info in parsed.get("scenes_and_groups", []):
-        for item_info in scene_info.get("items", []):
-            item_id = item_info.get("id")
-            if item_id is None:
-                continue
-            item = obs.obs_scene_find_sceneitem_by_id(scene, item_id)
-            if item is None:
-                continue
-            source = obs.obs_sceneitem_get_source(item)
-            src_id = obs.obs_source_get_unversioned_id(source)
-            if src_id.startswith(_DISPLAY_CAPTURE_PREFIXES):
-                yield obs.obs_source_get_name(source)
+                # Scene-item IDs are local to each scene/group, not global.
+                for item_info in scene_info.get("items", []):
+                    item_id = item_info.get("id")
+                    if item_id is None:
+                        continue
+                    item = obs.obs_scene_find_sceneitem_by_id(item_scene, item_id)
+                    if item is None:
+                        continue
+                    source = obs.obs_sceneitem_get_source(item)
+                    src_id = obs.obs_source_get_unversioned_id(source)
+                    if src_id.startswith(_DISPLAY_CAPTURE_PREFIXES):
+                        name = obs.obs_source_get_name(source)
+                        if name not in seen:
+                            seen.add(name)
+                            yield name
+            finally:
+                if group_source is not None:
+                    obs.obs_source_release(group_source)
+    finally:
+        obs.obs_source_release(scene_src)
 
 
 def _populate_capture_list(prop):
@@ -575,34 +638,40 @@ def _populate_capture_list(prop):
 
 
 def _get_filter_crop(source):
-    """Read crop values from a Crop/Pad filter on *source*, if any.
+    """Sum the enabled Crop/Pad filters' offsets on *source*.
 
     Iterates the source's filter list via ``obs_source_backup_filters``
     (avoids the broken callback-based ``obs_source_enum_filters``).
 
-    Returns ``(left, top, right, bottom)`` or ``(0, 0, 0, 0)`` if no
-    crop filter is found.
+    Returns ``(left, top, right, bottom)``.  Left/top include both relative
+    and absolute crops; right/bottom total only explicit relative edge
+    settings, not the output-size changes from absolute crops.  Coordinate
+    mapping uses left/top; OBS supplies the filtered output dimensions.
     """
     import json
     filters = obs.obs_source_backup_filters(source)
-    count = obs.obs_data_array_count(filters)
     left = top = right = bottom = 0
-    for i in range(count):
-        fdata = obs.obs_data_array_item(filters, i)
-        fjson = obs.obs_data_get_json(fdata)
-        obs.obs_data_release(fdata)
-        if not fjson:
-            continue
-        fobj = json.loads(fjson)
-        fid = fobj.get("id", "")
-        if fid == "crop_filter":
+    try:
+        count = obs.obs_data_array_count(filters)
+        for i in range(count):
+            fdata = obs.obs_data_array_item(filters, i)
+            try:
+                fjson = obs.obs_data_get_json(fdata)
+            finally:
+                obs.obs_data_release(fdata)
+            if not fjson:
+                continue
+            fobj = json.loads(fjson)
+            if fobj.get("id") != "crop_filter" or not fobj.get("enabled", True):
+                continue
             settings = fobj.get("settings", {})
-            left = settings.get("left", 0)
-            top = settings.get("top", 0)
-            right = settings.get("right", 0)
-            bottom = settings.get("bottom", 0)
-            break
-    obs.obs_data_array_release(filters)
+            left += settings.get("left", 0)
+            top += settings.get("top", 0)
+            if settings.get("relative", True):
+                right += settings.get("right", 0)
+                bottom += settings.get("bottom", 0)
+    finally:
+        obs.obs_data_array_release(filters)
     return (left, top, right, bottom)
 
 
@@ -762,11 +831,13 @@ def _resolve_display_for_source(source_name):
             # 2. Fall back to monitor index (legacy OBS)
             if 0 <= monitor_idx < len(_all_displays):
                 return _all_displays[monitor_idx]
-        else:
-            # Linux xshm_input: "screen" is typically 0 for first X screen
+        elif src_id.startswith("xshm_input"):
+            # OBS uses RandR's active-monitor IDs, not connector/list order.
+            # Synthetic fallback displays intentionally have no obs_screen.
             screen_idx = obs.obs_data_get_int(settings, "screen")
-            if 0 <= screen_idx < len(_all_displays):
-                return _all_displays[screen_idx]
+            for d in _all_displays:
+                if d.get("obs_screen") == screen_idx:
+                    return d
     except Exception as exc:
         obs.script_log(obs.LOG_INFO,
                        f"Click Pop: _resolve_display_for_source error: {exc}")
@@ -832,94 +903,145 @@ def _resolve_captured_display():
     _captured_display = _resolve_display_for_source(name)
 
 
+def _find_capture_path(scene, name):
+    """Return root-to-capture (borrowed item, saved state) pairs.
+
+    OBS's recursive source lookup only searches one group level.  Its saved
+    transform snapshot gives us each group's local item IDs without relying
+    on the callback-based enumeration API in Python.
+    """
+    import json
+    saved = obs.obs_scene_save_transform_states(scene, True)
+    try:
+        raw = obs.obs_data_get_json(saved)
+        snapshot = json.loads(raw) if raw else {}
+    finally:
+        obs.obs_data_release(saved)
+    scenes = {entry["scene_name"]: entry
+              for entry in snapshot.get("scenes_and_groups", [])}
+
+    def find(current):
+        scene_name = obs.obs_source_get_name(obs.obs_scene_get_source(current))
+        for state in scenes.get(scene_name, {}).get("items", []):
+            item = obs.obs_scene_find_sceneitem_by_id(current, state["id"])
+            if item is None:
+                continue
+            source = obs.obs_sceneitem_get_source(item)
+            if obs.obs_source_get_name(source) == name:
+                return [(item, state)]
+            if obs.obs_sceneitem_is_group(item):
+                path = find(obs.obs_sceneitem_group_get_scene(item))
+                if path:
+                    return [(item, state)] + path
+        return None
+
+    return find(scene)
+
+
+def _get_source_crop_offset(source):
+    """Source-property and enabled-filter crop preceding a scene item."""
+    settings = obs.obs_source_get_settings(source)
+    try:
+        left = obs.obs_data_get_int(settings, "cut_left")
+        top = obs.obs_data_get_int(settings, "cut_top")
+    finally:
+        obs.obs_data_release(settings)
+    filter_left, filter_top, _, _ = _get_filter_crop(source)
+    return left + filter_left, top + filter_top
+
+
+def _get_bounds_crop_offset(source, crop, state):
+    """Reproduce only OBS's hidden pre-draw Crop-to-Bounds texture offset.
+
+    The native draw matrix includes bounds placement, but get_crop() omits
+    this extra texture crop.  The snapshot exposes crop_to_bounds even on
+    bindings whose obs_transform_info wrapper does not expose that field.
+    """
+    bounds_type = state.get("bounds_type")
+    if not state.get("crop_to_bounds", False) or bounds_type not in (
+            obs.OBS_BOUNDS_SCALE_OUTER, obs.OBS_BOUNDS_SCALE_TO_WIDTH,
+            obs.OBS_BOUNDS_SCALE_TO_HEIGHT):
+        return 0, 0
+
+    width = obs.obs_source_get_width(source) - crop.left - crop.right
+    height = obs.obs_source_get_height(source) - crop.top - crop.bottom
+    width = 2 if width < 0 else width  # OBS calc_cx/calc_cy fallback
+    height = 2 if height < 0 else height
+    scale_x, scale_y = state["scale"]["x"], state["scale"]["y"]
+    bounds_w, bounds_h = state["bounds"]["x"], state["bounds"]["y"]
+    if not width or not height or not scale_x or not scale_y:
+        return 0, 0
+    width_ratio = bounds_w / (width * abs(scale_x))
+    height_ratio = bounds_h / (height * abs(scale_y))
+    if bounds_type == obs.OBS_BOUNDS_SCALE_TO_WIDTH:
+        factor = width_ratio
+    elif bounds_type == obs.OBS_BOUNDS_SCALE_TO_HEIGHT:
+        factor = height_ratio
+    else:
+        factor = max(width_ratio, height_ratio)
+    scale_x *= factor
+    scale_y *= factor
+    diff_x = bounds_w - width * abs(scale_x)
+    diff_y = bounds_h - height * abs(scale_y)
+    if diff_x < -0.1:
+        diff, scale = diff_x, scale_x
+        low, high = obs.OBS_ALIGN_LEFT, obs.OBS_ALIGN_RIGHT
+    elif diff_y < -0.1:
+        diff, scale = diff_y, scale_y
+        low, high = obs.OBS_ALIGN_TOP, obs.OBS_ALIGN_BOTTOM
+    else:
+        return 0, 0
+
+    overdraw = abs(diff / scale)
+    alignment = state.get("bounds_alignment", 0)
+    offset = 0 if alignment & low else overdraw if alignment & high else overdraw / 2
+    if scale < 0:
+        offset = overdraw - offset
+    offset = int(offset + 0.5)  # OBS roundf, not Python's ties-to-even round
+    return (offset, 0) if diff_x < -0.1 else (0, offset)
+
+
 def _get_capture_transform(scene, source_name=None):
-    """Read crop / position / scale from the named Display Capture source.
+    """Return source crop and the full source-to-canvas affine mapping.
 
-    Checks both the scene-item crop (Edit Transform) and Crop/Pad filters.
-
-    Returns ``(crop_left, crop_top, pos_x, pos_y, scale_x, scale_y)``
-    or ``None`` if no source name is configured or the source isn't found.
+    Native draw transforms handle alignment, rotation, flips and all bounds
+    modes.  Manual/automatic texture crops precede each item's draw matrix;
+    enclosing groups are then applied from the capture out to the canvas.
     """
     name = source_name or _settings.get("capture_source", "")
-    if not name or name == _ALL_CAPTURES_LABEL:
+    if scene is None or not name or name in ("(none)", _ALL_CAPTURES_LABEL):
+        return None
+    path = _find_capture_path(scene, name)
+    if not path:
         return None
 
-    item = obs.obs_scene_find_source_recursive(scene, name)
-    if item is None:
-        return None
+    source = obs.obs_sceneitem_get_source(path[-1][0])
+    crop_left, crop_top = _get_source_crop_offset(source)
+    transform = (1, 0, 0, 1, 0, 0)
+    for depth, (item, state) in enumerate(reversed(path)):
+        source = obs.obs_sceneitem_get_source(item)
+        crop = obs.obs_sceneitem_crop()
+        obs.obs_sceneitem_get_crop(item, crop)
+        left, top = _get_bounds_crop_offset(source, crop, state)
+        left += crop.left
+        top += crop.top
+        if depth:  # group filters run after its children have been composed
+            group_left, group_top = _get_source_crop_offset(source)
+            left += group_left
+            top += group_top
 
-    source = obs.obs_sceneitem_get_source(item)
+        matrix = obs.matrix4()
+        obs.obs_sceneitem_get_draw_transform(item, matrix)
+        xx, xy, yx, yy = matrix.x.x, matrix.y.x, matrix.x.y, matrix.y.y
+        tx = matrix.t.x - xx * left - xy * top
+        ty = matrix.t.y - yx * left - yy * top
+        a, b, c, d, e, f = transform
+        transform = (xx * a + xy * c, xx * b + xy * d,
+                     yx * a + yy * c, yx * b + yy * d,
+                     xx * e + xy * f + tx, yx * e + yy * f + ty)
 
-    # 1. Source-level crop (set via source Properties, e.g. XSHM "Crop Left")
-    src_settings = obs.obs_source_get_settings(source)
-    src_crop_left = obs.obs_data_get_int(src_settings, "cut_left")
-    src_crop_top = obs.obs_data_get_int(src_settings, "cut_top")
-    src_crop_right = obs.obs_data_get_int(src_settings, "cut_right")
-    src_crop_bottom = obs.obs_data_get_int(src_settings, "cut_bottom")
-    obs.obs_data_release(src_settings)
-
-    # 2. Scene-item crop (set via Edit Transform / Alt-drag)
-    item_crop = obs.obs_sceneitem_crop()
-    obs.obs_sceneitem_get_crop(item, item_crop)
-
-    # 3. Crop/Pad filter crop (set via Filters)
-    flt_left, flt_top, flt_right, flt_bottom = _get_filter_crop(source)
-
-    # Total crop offset for coordinate mapping (left/top only)
-    crop_left = src_crop_left + item_crop.left + flt_left
-    crop_top = src_crop_top + item_crop.top + flt_top
-
-    pos = obs.vec2()
-    obs.obs_sceneitem_get_pos(item, pos)
-
-    # Compute effective scale and centering offset.
-    #
-    # obs_source_get_width/height returns the post-crop output size.  The
-    # scene-item crop is applied on top of that before bounds scaling.
-    # With SCALE_INNER / SCALE_OUTER, one dimension may not fill the
-    # bounds, so OBS centers the content — we must account for that offset.
-    bounds_type = obs.obs_sceneitem_get_bounds_type(item)
-    offset_x = 0.0
-    offset_y = 0.0
-    if bounds_type != obs.OBS_BOUNDS_NONE:
-        bounds = obs.vec2()
-        obs.obs_sceneitem_get_bounds(item, bounds)
-
-        # The size OBS actually scales is the source output minus item crop
-        src_w = obs.obs_source_get_width(source) or 1
-        src_h = obs.obs_source_get_height(source) or 1
-        vis_w = max(src_w - item_crop.left - item_crop.right, 1)
-        vis_h = max(src_h - item_crop.top - item_crop.bottom, 1)
-
-        if bounds_type == obs.OBS_BOUNDS_STRETCH:
-            scale_x = bounds.x / vis_w
-            scale_y = bounds.y / vis_h
-        elif bounds_type == obs.OBS_BOUNDS_SCALE_INNER:
-            s = min(bounds.x / vis_w, bounds.y / vis_h)
-            scale_x = scale_y = s
-        elif bounds_type == obs.OBS_BOUNDS_SCALE_OUTER:
-            s = max(bounds.x / vis_w, bounds.y / vis_h)
-            scale_x = scale_y = s
-        elif bounds_type == obs.OBS_BOUNDS_SCALE_TO_WIDTH:
-            scale_x = scale_y = bounds.x / vis_w
-        elif bounds_type == obs.OBS_BOUNDS_SCALE_TO_HEIGHT:
-            scale_x = scale_y = bounds.y / vis_h
-        else:
-            scale_x = bounds.x / vis_w
-            scale_y = bounds.y / vis_h
-
-        # Centering offset (bounds_alignment=0 means centered)
-        offset_x = (bounds.x - vis_w * scale_x) / 2.0
-        offset_y = (bounds.y - vis_h * scale_y) / 2.0
-    else:
-        scale = obs.vec2()
-        obs.obs_sceneitem_get_scale(item, scale)
-        scale_x = scale.x
-        scale_y = scale.y
-
-    return (crop_left, crop_top,
-            pos.x + offset_x, pos.y + offset_y,
-            scale_x, scale_y)
+    return {"crop_left": crop_left, "crop_top": crop_top,
+            "capture_transform": transform}
 
 
 # ---------------------------------------------------------------------------
@@ -949,96 +1071,69 @@ def _spawn_circle(x, y, is_left, expire_time):
     Multi-monitor aware: determines which display was clicked, converts to
     display-local coordinates, and discards clicks on non-captured displays.
     """
-    # --- Multi-monitor: determine which display the click landed on ---
-    # Only use per-display logic when multiple displays are detected.
-    # Single-display setups fall through to the legacy path so that the
-    # user's manual monitor_w / monitor_h settings are always respected.
-    display = None
-    capture_source_name = None  # used in multi-capture mode
-    if len(_all_displays) > 1:
-        display = find_display_for_point(x, y, _all_displays)
+    # Routing and display-local coordinates also matter with just one
+    # monitor: it can have a nonzero origin or a cropped/scaled capture.
+    display = find_display_for_point(x, y, _all_displays)
+    capture_source_name = None
+    selected = _settings.get("capture_source", "")
+    if _multi_capture_mode:
+        info = _display_capture_map.get(display["id"]) if display else None
+        if info is None:
+            return
+        capture_source_name = info["source_name"]
+    else:
+        if selected not in ("", "(none)") and _captured_display is None:
+            return  # a capture transform cannot tell us its monitor's origin
+        if _captured_display is not None and display is not _captured_display:
+            return
 
-        if _multi_capture_mode:
-            if display is not None and display["id"] in _display_capture_map:
-                capture_source_name = _display_capture_map[display["id"]]["source_name"]
-            else:
-                return  # no capture source for this display
-        else:
-            # If a specific display is being captured, discard clicks on other
-            # displays.  Only applies when we have multiple displays — single
-            # display should never discard.
-            if _captured_display is not None and display is not _captured_display:
-                return
-
-    # Use display-specific values when a multi-monitor hit was found,
-    # otherwise fall back to settings (preserves single-display behavior).
     if display is not None:
         local_x = x - display["x"]
         local_y = y - display["y"]
-        mon_w = display["w"]
-        mon_h = display["h"]
         retina = display.get("retina_scale", 1.0)
     else:
         local_x = x
         local_y = y
-        mon_w = _settings["monitor_w"]
-        mon_h = _settings["monitor_h"]
         retina = _retina_scale
 
-    # Pick a source name from a pool so we can show multiple simultaneous
-    prefix = "__click_pop_L_" if is_left else "__click_pop_R_"
-    max_c = _settings["max_circles"]
-
-    src_name, evicted = allocate_slot(prefix, max_c, _active_clicks)
-    if evicted is not None:
-        _hide_source(evicted)
-
-    image_path = _settings["left_image"] if is_left else _settings["right_image"]
+    if display is not None and not _settings["override_monitor"]:
+        mon_w = display["w"]
+        mon_h = display["h"]
+    else:
+        mon_w = _settings["monitor_w"]
+        mon_h = _settings["monitor_h"]
     size = _settings["circle_size"]
 
-    # Map mouse coords → OBS canvas coords
+    # Map mouse coords to canvas coords before allocating a source.  A
+    # selected capture missing from this scene must not produce a guessed
+    # position or evict an existing indicator.
     scene_src = obs.obs_frontend_get_current_scene()
-    canvas_w = obs.obs_source_get_width(scene_src) or _settings["monitor_w"]
-    canvas_h = obs.obs_source_get_height(scene_src) or _settings["monitor_h"]
-    scene = obs.obs_scene_from_source(scene_src)
-    transform = _get_capture_transform(scene, capture_source_name) if scene else None
-    obs.obs_source_release(scene_src)
+    if scene_src is None:
+        return
+    try:
+        scene = obs.obs_scene_from_source(scene_src)
+        if scene is None:
+            return
+        transform = _get_capture_transform(scene, capture_source_name)
+        if transform is None and (capture_source_name or selected not in ("", "(none)")):
+            return
 
-    kwargs = {}
-    if transform is not None:
-        crop_left, crop_top, pos_x, pos_y, scale_x, scale_y = transform
-        kwargs = dict(crop_left=crop_left, crop_top=crop_top,
-                      capture_pos_x=pos_x, capture_pos_y=pos_y,
-                      capture_scale_x=scale_x, capture_scale_y=scale_y)
+        canvas_w = obs.obs_source_get_width(scene_src) or mon_w
+        canvas_h = obs.obs_source_get_height(scene_src) or mon_h
+        # Retina clicks are logical points; capture transforms use pixels.
+        # With no selection, map this monitor only, not the whole desktop.
+        obs_x, obs_y = map_coords(
+            local_x * retina, local_y * retina, canvas_w, canvas_h,
+            mon_w * retina, mon_h * retina, size, **(transform or {}),
+        )
+    finally:
+        obs.obs_source_release(scene_src)
 
-    # On macOS Retina, pynput reports logical "points" but OBS and the
-    # capture source work in physical pixels (2x on HiDPI).  Scale both
-    # the mouse coords and monitor dimensions so everything is in the
-    # same pixel space.  retina is 1.0 on non-Retina / non-macOS.
-    phys_x = local_x * retina
-    phys_y = local_y * retina
-    phys_mon_w = mon_w * retina
-    phys_mon_h = mon_h * retina
-
-    # When no capture source transform is available but we detected
-    # multiple displays, the display-local coords with single-monitor
-    # dimensions would produce wrong scaling (e.g. canvas_w / mon_w =
-    # 3840 / 1920 = 2.0).  Fall back to global coords mapped across the
-    # entire virtual desktop so the proportional mapping stays correct.
-    if transform is None and display is not None:
-        vd_left = min(d["x"] for d in _all_displays)
-        vd_top = min(d["y"] for d in _all_displays)
-        vd_right = max(d["x"] + d["w"] for d in _all_displays)
-        vd_bottom = max(d["y"] + d["h"] for d in _all_displays)
-        phys_x = (x - vd_left) * retina
-        phys_y = (y - vd_top) * retina
-        phys_mon_w = (vd_right - vd_left) * retina
-        phys_mon_h = (vd_bottom - vd_top) * retina
-
-    obs_x, obs_y = map_coords(phys_x, phys_y, canvas_w, canvas_h,
-                              phys_mon_w, phys_mon_h,
-                              size, **kwargs)
-
+    prefix = "__click_pop_L_" if is_left else "__click_pop_R_"
+    src_name, evicted = allocate_slot(prefix, _settings["max_circles"], _active_clicks)
+    if evicted is not None:
+        _hide_source(evicted)
+    image_path = _settings["left_image"] if is_left else _settings["right_image"]
     _show_source(src_name, image_path, obs_x, obs_y, size)
     _active_clicks.append((src_name, expire_time))
 

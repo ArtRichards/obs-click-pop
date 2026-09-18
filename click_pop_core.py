@@ -11,26 +11,32 @@ def find_display_for_point(x, y, displays):
 
 def map_coords(x, y, canvas_w, canvas_h, monitor_w, monitor_h, circle_size,
                crop_left=0, crop_top=0, capture_pos_x=0, capture_pos_y=0,
-               capture_scale_x=None, capture_scale_y=None):
+               capture_scale_x=None, capture_scale_y=None,
+               capture_transform=None):
     """Map mouse coordinates to OBS canvas coordinates, centered on the circle.
 
-    When *capture_scale_x/y* are provided (i.e. a Display Capture with known
-    crop/position/scale was found), the mapping accounts for cropping and
-    the item's transform in the scene.  Otherwise falls back to simple
-    proportional mapping across the full monitor.
+    *capture_transform* is an affine tuple ``(xx, xy, yx, yy, tx, ty)``
+    mapping cropped source pixels into canvas space, including any groups.
+    Otherwise, use explicit position/scale or proportional mapping across
+    one full monitor.  Center the indicator only after the transformation
+    so its diameter stays in canvas pixels.
 
     Returns (obs_x, obs_y).
     """
-    if capture_scale_x is None:
-        capture_scale_x = canvas_w / monitor_w
-    if capture_scale_y is None:
-        capture_scale_y = canvas_h / monitor_h
-
     cropped_x = x - crop_left
     cropped_y = y - crop_top
-    obs_x = capture_pos_x + cropped_x * capture_scale_x - circle_size / 2
-    obs_y = capture_pos_y + cropped_y * capture_scale_y - circle_size / 2
-    return (obs_x, obs_y)
+    if capture_transform is not None:
+        xx, xy, yx, yy, tx, ty = capture_transform
+        obs_x = xx * cropped_x + xy * cropped_y + tx
+        obs_y = yx * cropped_x + yy * cropped_y + ty
+    else:
+        if capture_scale_x is None:
+            capture_scale_x = canvas_w / monitor_w
+        if capture_scale_y is None:
+            capture_scale_y = canvas_h / monitor_h
+        obs_x = capture_pos_x + cropped_x * capture_scale_x
+        obs_y = capture_pos_y + cropped_y * capture_scale_y
+    return (obs_x - circle_size / 2, obs_y - circle_size / 2)
 
 
 def allocate_slot(prefix, max_circles, active_clicks):

@@ -20,6 +20,7 @@ Your viewers will see exactly where you clicked, but you don't see any click ove
   - Crop/Pad filter
 - Auto-detection of Display Capture sources with an editable dropdown
 - Correct handling of OBS bounding box scaling modes (Scale Inner, Stretch, etc.)
+- Capture positioning follows OBS transforms, including moved/scaled groups
 - Configurable circle size, duration, and max simultaneous circles
 - Works on 4K monitors with scaled canvas output
 - Supports multi-monitor setups
@@ -77,15 +78,23 @@ If your distro's OBS package was built against a different Python version, match
    - **Left/Right-click images** — what overlay graphic to use for left and right clicks. By default, red and blue circles are used.
    - **Circle duration** — how long each indicator stays visible (default 350 ms)
    - **Circle diameter** — size in pixels (default 60)
-   - **Monitor width/height** — your display resolution (auto-detected but overrideable)
+   - **Monitor width/height** — auto-detected; enable **Override monitor dimensions** to change the dimensions used by fallback mapping
    - **Max simultaneous circles** — how many indicators can show at once (default 5)
-   - **Display Capture source** — select your Display Capture from the dropdown for crop-aware positioning (leave blank if no crop is applied)
+   - **Display Capture source** — select the capture being shown for accurate positioning, including crops, scaling, and groups. Use **(all - auto detect)** for one capture per monitor (also works with a single monitor).
 4. Click **Start Listener**
 5. Start recording — clicks will appear as colored circles in the output
+
+After updating the Python files, restart OBS so both the main script and its
+`click_pop_core.py` helper are reloaded. Then select your capture, click
+**Refresh Displays**, and **Start Listener**.
 
 ### Cropped Display Capture
 
 If your Display Capture source is cropped to a sub-region of your screen, select it from the **Display Capture source** dropdown. The script reads crop offsets and scale from the source properties, scene-item transform, and any Crop/Pad filters to map mouse coordinates correctly.
+
+Disabled Crop/Pad filters are ignored; multiple enabled crop filters are combined.
+
+Leaving the selection blank or choosing **(none)** uses a simpler fallback: it maps the clicked monitor to the full canvas. It does **not** map the entire multi-monitor desktop or account for a capture's crop, position, or aspect-ratio padding. Select a capture for those adjustments. If a selected capture is absent from the current scene or its monitor cannot be identified, indicators are skipped instead of placed using a guessed origin or transform.
 
 
 ## Customization
@@ -99,6 +108,9 @@ You need to click on "Refresh Displays":
 - after you add or remove Screen Capture sources
 - after you change monitor connections on your machine
 - after you change a Screen Capture source's Display
+- after switching scenes when using **(all - auto detect)**
+
+On Linux, automatic monitor matching requires `xrandr --listactivemonitors` (RandR 1.5+). This uses the same active-monitor numbering as OBS XSHM; connector order from `xrandr --query` can be different. If detection fails, the script logs a warning instead of guessing a monitor ID.
 
 
 ## Platform Support
@@ -115,6 +127,7 @@ You need to click on "Refresh Displays":
 
 - No drag visualization (only click points)
 - Circle appears at click position instantly (no fade-in/fade-out animation)
+- Geometry-changing source filters other than Crop/Pad (for example, Scale/Aspect Ratio) are not mapped. Scene-item and group transforms are supported.
 
 
 ## How It Works
@@ -139,7 +152,7 @@ python -m venv .venv
 
 The test suite includes:
 - **Tier 1** — Pure logic tests (coordinate mapping, slot allocation, circle expiration)
-- **Tier 2** — Mock OBS integration tests (positioning, ref management, visibility)
+- **Tier 2** — Mock OBS integration tests (the click-to-canvas pipeline, monitor matching, crop filters, group transforms, ref management, visibility)
 - **E2E stubs** — Marked `@pytest.mark.e2e`, skipped by default (require a running OBS instance)
 
 

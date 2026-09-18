@@ -1,5 +1,7 @@
 """Tests for multi-screen support: display hit-testing and coordinate mapping."""
 
+from unittest.mock import Mock
+
 import pytest
 from click_pop_core import find_display_for_point, map_coords
 
@@ -11,6 +13,11 @@ from click_pop_core import find_display_for_point, map_coords
 DUAL_SIDE_BY_SIDE = [
     {"id": 1, "x": 0, "y": 0, "w": 1920, "h": 1080, "retina_scale": 1.0},
     {"id": 2, "x": 1920, "y": 0, "w": 2560, "h": 1440, "retina_scale": 1.0},
+]
+
+DUAL_IDENTICAL = [
+    {"id": 1, "x": 0, "y": 0, "w": 1920, "h": 1080, "retina_scale": 1.0},
+    {"id": 2, "x": 1920, "y": 0, "w": 1920, "h": 1080, "retina_scale": 1.0},
 ]
 
 DUAL_VERTICAL = [
@@ -74,10 +81,7 @@ class TestFindDisplayForPoint:
         assert d is DUAL_SIDE_BY_SIDE[0]
 
     def test_click_in_dead_zone(self):
-        """Click at (1920, 1200) — beyond secondary in DUAL_SIDE_BY_SIDE."""
-        # Secondary is 2560x1440 starting at (1920, 0), so (1920, 1200)
-        # is inside it. But let's test an actual dead zone.
-        # In L-shaped layout, (1920, 1200) is in the gap.
+        """The lower-right corner of the L-shaped layout has no monitor."""
         d = find_display_for_point(1920, 1200, TRIPLE_L_SHAPE)
         assert d is None
 
@@ -117,18 +121,11 @@ class TestFindDisplayForPoint:
 
 
 # ---------------------------------------------------------------------------
-# Multi-monitor coordinate mapping integration tests
+# Pure coordinate mapping tests with display-local input
 # ---------------------------------------------------------------------------
 
 class TestMultiScreenCoordMapping:
-    """Simulate the full coordinate pipeline for multi-monitor setups.
-
-    These tests reproduce what _spawn_circle() does:
-    1. find_display_for_point(global_x, global_y)
-    2. local_x = global_x - display["x"]
-    3. phys_x = local_x * retina_scale
-    4. map_coords(phys_x, phys_y, canvas_w, canvas_h, mon_w*retina, mon_h*retina, size)
-    """
+    """Check map_coords with logical/physical pixel and monitor-size inputs."""
 
     def test_click_on_primary_1080p_canvas(self):
         """Click at center of primary display, 1:1 canvas."""
@@ -231,118 +228,6 @@ class TestMultiScreenCoordMapping:
 
 
 # ---------------------------------------------------------------------------
-# Discard logic tests (clicks on non-captured display)
-# ---------------------------------------------------------------------------
-
-class TestDiscardNonCapturedClicks:
-    """Verify the logic that discards clicks landing on non-captured displays.
-
-    This tests the pure logic that _spawn_circle() uses — we replicate the
-    check without needing OBS.  Note: the discard logic only activates when
-    there are multiple displays (len(displays) > 1).
-    """
-
-    def _should_discard(self, gx, gy, displays, captured_display):
-        """Replicate the discard logic from _spawn_circle."""
-        # Single display never discards — matches _spawn_circle behavior
-        if len(displays) <= 1:
-            return False
-        display = find_display_for_point(gx, gy, displays)
-        if captured_display is not None and display is not captured_display:
-            return True
-        return False
-
-    def test_click_on_captured_display_not_discarded(self):
-        captured = DUAL_SIDE_BY_SIDE[0]
-        assert not self._should_discard(100, 100, DUAL_SIDE_BY_SIDE, captured)
-
-    def test_click_on_other_display_discarded(self):
-        captured = DUAL_SIDE_BY_SIDE[0]
-        assert self._should_discard(2000, 500, DUAL_SIDE_BY_SIDE, captured)
-
-    def test_click_on_secondary_when_secondary_captured(self):
-        captured = DUAL_SIDE_BY_SIDE[1]
-        assert not self._should_discard(2000, 500, DUAL_SIDE_BY_SIDE, captured)
-
-    def test_click_on_primary_when_secondary_captured(self):
-        captured = DUAL_SIDE_BY_SIDE[1]
-        assert self._should_discard(100, 100, DUAL_SIDE_BY_SIDE, captured)
-
-    def test_no_captured_display_never_discards(self):
-        """When no capture source is configured, all clicks pass through."""
-        assert not self._should_discard(100, 100, DUAL_SIDE_BY_SIDE, None)
-        assert not self._should_discard(2000, 500, DUAL_SIDE_BY_SIDE, None)
-
-    def test_click_in_dead_zone_discarded(self):
-        """Click in dead zone is discarded (display=None, captured!=None)."""
-        captured = TRIPLE_L_SHAPE[0]
-        assert self._should_discard(1920, 1200, TRIPLE_L_SHAPE, captured)
-
-    def test_click_in_dead_zone_no_capture_not_discarded(self):
-        """Click in dead zone with no capture source passes through."""
-        assert not self._should_discard(1920, 1200, TRIPLE_L_SHAPE, None)
-
-
-# ---------------------------------------------------------------------------
-# Single-display regression tests
-# ---------------------------------------------------------------------------
-
-class TestSingleDisplayRegression:
-    """Ensure single-display setups use the legacy code path unchanged.
-
-    With only one display detected, _spawn_circle should:
-    - Never discard clicks
-    - Use raw x/y (not display-local, since origin is 0,0 anyway)
-    - Use _settings["monitor_w"] / _retina_scale (not display dict)
-    """
-
-    def test_single_display_never_discards(self):
-        """Even with _captured_display set, single display never discards."""
-        captured = SINGLE[0]
-        # With a single display, discard logic is skipped entirely
-        assert not self._should_discard(100, 100, SINGLE, captured)
-
-    def test_single_display_no_capture_never_discards(self):
-        assert not self._should_discard(960, 540, SINGLE, None)
-
-    def test_single_display_edge_coords_never_discards(self):
-        """Even coordinates at display edges are never discarded."""
-        captured = SINGLE[0]
-        assert not self._should_discard(0, 0, SINGLE, captured)
-        assert not self._should_discard(1919, 1079, SINGLE, captured)
-
-    def _should_discard(self, gx, gy, displays, captured_display):
-        """Replicate _spawn_circle discard logic."""
-        if len(displays) <= 1:
-            return False
-        display = find_display_for_point(gx, gy, displays)
-        if captured_display is not None and display is not captured_display:
-            return True
-        return False
-
-    def test_single_display_uses_raw_coords(self):
-        """With one display, x/y pass through unchanged (no subtraction)."""
-        # Simulate what _spawn_circle does with len(_all_displays) <= 1
-        # Center of a 1680x1050 Retina display
-        x, y = 840, 525
-        # display is None when len <= 1, so we use the legacy path:
-        local_x = x  # no offset subtracted
-        local_y = y
-        retina = 2.0  # _retina_scale from settings
-        mon_w = 1680  # _settings["monitor_w"]
-        mon_h = 1050
-
-        result = map_coords(
-            local_x * retina, local_y * retina,
-            1920, 1080,
-            mon_w * retina, mon_h * retina,
-            80,
-        )
-        # Same result as the old single-display code path
-        assert result == pytest.approx((920.0, 500.0), abs=1.0)
-
-
-# ---------------------------------------------------------------------------
 # Windows DPI scaling regression tests
 # ---------------------------------------------------------------------------
 
@@ -413,182 +298,103 @@ class TestDpiScalingRegression:
         # obs_y = 540 * 1.0 - 40 = 500
         assert result == pytest.approx((920.0, 500.0))
 
-    def test_discard_secondary_when_4k_captured(self):
-        """Clicks on secondary should be discarded when 4K primary is captured."""
-        captured = DUAL_DPI_PHYSICAL[0]
-        display = find_display_for_point(4000, 500, DUAL_DPI_PHYSICAL)
-        assert display is not captured
-        # _spawn_circle would discard this click
-        assert display is DUAL_DPI_PHYSICAL[1]
-
 
 # ---------------------------------------------------------------------------
-# Multi-capture routing tests (all - auto detect)
+# Additional routing cases through the actual click pipeline
 # ---------------------------------------------------------------------------
 
-class TestMultiCaptureRouting:
-    """Test the routing logic used when multi-capture mode is active.
-
-    Replicates the _spawn_circle decision logic for the "(all - auto detect)" mode:
-    - find_display_for_point to determine which display the click hit
-    - look up display["id"] in _display_capture_map
-    - return the source name if mapped, or discard if not
-    """
-
-    def _route_click(self, gx, gy, displays, display_capture_map):
-        """Replicate _spawn_circle multi-capture routing.
-
-        Returns the capture source name for the click, or None if discarded.
-        """
-        if len(displays) <= 1:
-            return None  # multi-display path skipped
-        display = find_display_for_point(gx, gy, displays)
-        if display is not None and display["id"] in display_capture_map:
-            return display_capture_map[display["id"]]["source_name"]
-        return None  # discarded
-
-    def test_click_on_primary_routes_to_primary_source(self):
-        cap_map = {
-            1: {"display": DUAL_SIDE_BY_SIDE[0], "source_name": "Display Capture 1"},
-            2: {"display": DUAL_SIDE_BY_SIDE[1], "source_name": "Display Capture 2"},
-        }
-        result = self._route_click(100, 200, DUAL_SIDE_BY_SIDE, cap_map)
-        assert result == "Display Capture 1"
-
-    def test_click_on_secondary_routes_to_secondary_source(self):
-        cap_map = {
-            1: {"display": DUAL_SIDE_BY_SIDE[0], "source_name": "Display Capture 1"},
-            2: {"display": DUAL_SIDE_BY_SIDE[1], "source_name": "Display Capture 2"},
-        }
-        result = self._route_click(2000, 500, DUAL_SIDE_BY_SIDE, cap_map)
-        assert result == "Display Capture 2"
-
-    def test_click_on_unmapped_display_discarded(self):
-        """Only primary is mapped; click on secondary should be discarded."""
-        cap_map = {
-            1: {"display": DUAL_SIDE_BY_SIDE[0], "source_name": "Display Capture 1"},
-        }
-        result = self._route_click(2000, 500, DUAL_SIDE_BY_SIDE, cap_map)
-        assert result is None
-
-    def test_click_in_dead_zone_discarded(self):
-        cap_map = {
-            1: {"display": TRIPLE_L_SHAPE[0], "source_name": "DC1"},
-            2: {"display": TRIPLE_L_SHAPE[1], "source_name": "DC2"},
-            3: {"display": TRIPLE_L_SHAPE[2], "source_name": "DC3"},
-        }
-        # (1920, 1200) is in the dead zone of the L-shaped layout
-        result = self._route_click(1920, 1200, TRIPLE_L_SHAPE, cap_map)
-        assert result is None
-
-    def test_triple_monitor_all_mapped(self):
-        cap_map = {
-            1: {"display": TRIPLE_L_SHAPE[0], "source_name": "DC1"},
-            2: {"display": TRIPLE_L_SHAPE[1], "source_name": "DC2"},
-            3: {"display": TRIPLE_L_SHAPE[2], "source_name": "DC3"},
-        }
-        assert self._route_click(500, 500, TRIPLE_L_SHAPE, cap_map) == "DC1"
-        assert self._route_click(2500, 500, TRIPLE_L_SHAPE, cap_map) == "DC2"
-        assert self._route_click(500, 1500, TRIPLE_L_SHAPE, cap_map) == "DC3"
-
-    def test_single_display_skips_multi_path(self):
-        """With only one display, multi-capture routing is not used."""
-        cap_map = {
-            1: {"display": SINGLE[0], "source_name": "Display Capture"},
-        }
-        # _route_click returns None because len(displays) <= 1
-        result = self._route_click(960, 540, SINGLE, cap_map)
-        assert result is None
-
-    def test_empty_capture_map_discards_all(self):
-        """When no sources are mapped, all clicks are discarded."""
-        result = self._route_click(100, 200, DUAL_SIDE_BY_SIDE, {})
-        assert result is None
+@pytest.fixture
+def routing_script(obs_script, monkeypatch):
+    monkeypatch.setattr(obs_script, "_show_source", Mock())
+    monkeypatch.setattr(obs_script, "_hide_source", Mock())
+    monkeypatch.setattr(obs_script, "_get_capture_transform", Mock(return_value={}))
+    return obs_script
 
 
-# Two identical 1920x1080 displays side-by-side (user's exact setup)
-DUAL_IDENTICAL = [
-    {"id": 1, "x": 0, "y": 0, "w": 1920, "h": 1080, "retina_scale": 1.0},
-    {"id": 2, "x": 1920, "y": 0, "w": 1920, "h": 1080, "retina_scale": 1.0},
-]
+@pytest.mark.parametrize("point,expected_source,expected_center", [
+    ((500, 500), "Capture primary", (350, 300)),
+    ((2420, 500), "Capture right", (1250, 300)),
+    ((500, 1580), "Capture below", (175, 825)),
+])
+def test_all_mode_routes_each_monitor_to_its_own_transform(
+        routing_script, mock_obs, point, expected_source, expected_center):
+    routing_script._all_displays = TRIPLE_L_SHAPE
+    routing_script._multi_capture_mode = True
+    routing_script._settings["capture_source"] = routing_script._ALL_CAPTURES_LABEL
+    routing_script._display_capture_map = {
+        1: {"display": TRIPLE_L_SHAPE[0], "source_name": "Capture primary"},
+        2: {"display": TRIPLE_L_SHAPE[1], "source_name": "Capture right"},
+        3: {"display": TRIPLE_L_SHAPE[2], "source_name": "Capture below"},
+    }
+    transforms = {
+        "Capture primary": (0.5, 0, 0, 0.5, 100, 50),
+        "Capture right": (0.5, 0, 0, 0.5, 1000, 50),
+        "Capture below": (0.25, 0, 0, 0.25, 50, 700),
+    }
+    routing_script._get_capture_transform.side_effect = lambda scene, name: {
+        "capture_transform": transforms[name],
+    }
+
+    routing_script._spawn_circle(*point, True, 999)
+
+    routing_script._get_capture_transform.assert_called_once_with(
+        mock_obs._scene, expected_source)
+    routing_script._show_source.assert_called_once()
+    _, _, x, y, size = routing_script._show_source.call_args.args
+    assert (x + size / 2, y + size / 2) == pytest.approx(expected_center)
 
 
-# ---------------------------------------------------------------------------
-# Virtual desktop fallback tests (no capture source selected)
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("all_mode", [False, True])
+def test_click_in_monitor_gap_does_not_draw_or_evict(routing_script, mock_obs, all_mode):
+    routing_script._all_displays = TRIPLE_L_SHAPE
+    routing_script._captured_display = TRIPLE_L_SHAPE[0]
+    routing_script._multi_capture_mode = all_mode
+    routing_script._settings["capture_source"] = (
+        routing_script._ALL_CAPTURES_LABEL if all_mode else "Capture primary")
+    routing_script._display_capture_map = {
+        1: {"display": TRIPLE_L_SHAPE[0], "source_name": "Capture primary"},
+        2: {"display": TRIPLE_L_SHAPE[1], "source_name": "Capture right"},
+        3: {"display": TRIPLE_L_SHAPE[2], "source_name": "Capture below"},
+    }
+    routing_script._settings["max_circles"] = 1
+    routing_script._active_clicks[:] = [("__click_pop_L_0", 500)]
 
-class TestVirtualDesktopFallback:
-    """Test coordinate mapping when no capture source is configured.
+    routing_script._spawn_circle(1920, 1200, True, 999)
 
-    When transform is None and multiple displays are detected,
-    _spawn_circle should use global coords mapped across the entire
-    virtual desktop extent — NOT display-local coords with a single
-    monitor's dimensions (which would produce a wrong scale factor
-    like canvas_w / mon_w = 3840 / 1920 = 2.0).
-    """
+    routing_script._show_source.assert_not_called()
+    routing_script._hide_source.assert_not_called()
+    routing_script._get_capture_transform.assert_not_called()
+    mock_obs.obs_frontend_get_current_scene.assert_not_called()
+    assert routing_script._active_clicks == [("__click_pop_L_0", 500)]
 
-    def _map_no_transform(self, gx, gy, displays, canvas_w, canvas_h, size):
-        """Replicate _spawn_circle's coordinate mapping without a transform.
 
-        Returns (obs_x, obs_y) using the virtual desktop fallback.
-        """
-        display = find_display_for_point(gx, gy, displays)
-        assert display is not None, "click should land on a display"
+def test_selected_secondary_accepts_its_last_pixel(routing_script):
+    routing_script._all_displays = DUAL_SIDE_BY_SIDE
+    routing_script._captured_display = DUAL_SIDE_BY_SIDE[1]
+    routing_script._settings["capture_source"] = "Capture secondary"
+    routing_script._get_capture_transform.return_value = {
+        "capture_transform": (0.75, 0, 0, 0.75, 0, 0),
+    }
 
-        retina = display.get("retina_scale", 1.0)
+    routing_script._spawn_circle(4479, 1439, True, 999)
 
-        # Virtual desktop fallback (matches the fix in _spawn_circle)
-        vd_left = min(d["x"] for d in displays)
-        vd_top = min(d["y"] for d in displays)
-        vd_right = max(d["x"] + d["w"] for d in displays)
-        vd_bottom = max(d["y"] + d["h"] for d in displays)
-        phys_x = (gx - vd_left) * retina
-        phys_y = (gy - vd_top) * retina
-        phys_mon_w = (vd_right - vd_left) * retina
-        phys_mon_h = (vd_bottom - vd_top) * retina
+    routing_script._show_source.assert_called_once()
+    _, _, x, y, size = routing_script._show_source.call_args.args
+    assert (x + size / 2, y + size / 2) == pytest.approx((1919.25, 1079.25))
 
-        return map_coords(phys_x, phys_y, canvas_w, canvas_h,
-                          phys_mon_w, phys_mon_h, size)
 
-    def test_center_left_display_identical_pair(self):
-        """Click at center of left 1920x1080, canvas 3840x1080."""
-        obs_x, obs_y = self._map_no_transform(
-            960, 540, DUAL_IDENTICAL, 3840, 1080, 60)
-        # scale = 3840/3840 = 1.0, so obs_x = 960 - 30 = 930
-        assert obs_x == pytest.approx(930.0)
-        assert obs_y == pytest.approx(510.0)
+@pytest.mark.parametrize("displays,captured_index,point", [
+    (DUAL_SIDE_BY_SIDE, 1, (100, 100)),
+    (DUAL_DPI_PHYSICAL, 0, (4000, 500)),
+], ids=["secondary_selected", "physical_4k_primary_selected"])
+def test_selected_capture_rejects_other_display(
+        routing_script, displays, captured_index, point):
+    routing_script._all_displays = displays
+    routing_script._captured_display = displays[captured_index]
+    routing_script._settings["capture_source"] = "Selected capture"
 
-    def test_center_right_display_identical_pair(self):
-        """Click at center of right 1920x1080, canvas 3840x1080."""
-        obs_x, obs_y = self._map_no_transform(
-            1920 + 960, 540, DUAL_IDENTICAL, 3840, 1080, 60)
-        # global x=2880, scale=1.0, obs_x = 2880 - 30 = 2850
-        assert obs_x == pytest.approx(2850.0)
-        assert obs_y == pytest.approx(510.0)
+    routing_script._spawn_circle(*point, True, 999)
 
-    def test_left_edge_of_right_display(self):
-        """Click at left edge of right display."""
-        obs_x, obs_y = self._map_no_transform(
-            1920, 0, DUAL_IDENTICAL, 3840, 1080, 60)
-        assert obs_x == pytest.approx(1920 - 30.0)
-        assert obs_y == pytest.approx(-30.0)
-
-    def test_non_matching_canvas_scales_proportionally(self):
-        """Canvas smaller than virtual desktop: scale < 1.0."""
-        obs_x, obs_y = self._map_no_transform(
-            960, 540, DUAL_IDENTICAL, 1920, 540, 60)
-        # vd = 3840x1080, canvas = 1920x540, scale = 0.5
-        # obs_x = 960 * 0.5 - 30 = 450
-        # obs_y = 540 * 0.5 - 30 = 240
-        assert obs_x == pytest.approx(450.0)
-        assert obs_y == pytest.approx(240.0)
-
-    def test_mixed_resolution_displays(self):
-        """Two different-sized displays, canvas equals virtual desktop."""
-        # DUAL_SIDE_BY_SIDE: 1920x1080 + 2560x1440
-        # vd = (0,0)-(4480,1440) = 4480x1440
-        obs_x, obs_y = self._map_no_transform(
-            960, 540, DUAL_SIDE_BY_SIDE, 4480, 1440, 60)
-        # scale = 4480/4480 = 1.0
-        assert obs_x == pytest.approx(930.0)
-        assert obs_y == pytest.approx(510.0)
+    routing_script._show_source.assert_not_called()
+    routing_script._get_capture_transform.assert_not_called()
+    assert routing_script._active_clicks == []
