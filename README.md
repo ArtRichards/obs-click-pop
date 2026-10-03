@@ -42,7 +42,7 @@ Your viewers will see exactly where you clicked, but you don't see any click ove
 
 ### Prerequisites
 
-- **OBS Studio 30+** (tested with 32.0.2 and 32.0.4)
+- **OBS Studio 30+** (tested with 30.0.2, 32.0.2 and 32.0.4)
 - **Python 3.12** (must match the version OBS was built against)
 - **pynput** package (installed into the same Python — see platform steps below)
 
