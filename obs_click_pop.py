@@ -268,6 +268,14 @@ _all_displays = []        # list of display descriptors from _detect_all_display
 _captured_display = None  # display dict for the monitor being captured (or None)
 _display_capture_map = {}    # {display_id: {"display": dict, "source_name": str}}
 _multi_capture_mode = False  # True when "(all)" is selected
+_transform_cache = {}        # {(scene_name, source_name): (monotonic_time, mapping)}
+_TRANSFORM_CACHE_TTL_S = 1.0  # click bursts reuse one scene walk; edits show within 1 s
+
+# Alignment bits as libobs defines them; some SWIG builds do not export them.
+_ALIGN_LEFT = getattr(obs, "OBS_ALIGN_LEFT", 1 << 0)
+_ALIGN_RIGHT = getattr(obs, "OBS_ALIGN_RIGHT", 1 << 1)
+_ALIGN_TOP = getattr(obs, "OBS_ALIGN_TOP", 1 << 2)
+_ALIGN_BOTTOM = getattr(obs, "OBS_ALIGN_BOTTOM", 1 << 3)
 
 # Label used in the editable combo for multi-capture mode.
 # OBS_COMBO_TYPE_EDITABLE stores the label text as the setting value,
@@ -442,6 +450,7 @@ def _refresh_displays():
     """Re-enumerate displays and resolve the captured display."""
     global _all_displays, _retina_scale
     _all_displays = _detect_all_displays()
+    _transform_cache.clear()
     # Update _retina_scale from the primary display for backward compat
     if _all_displays:
         _retina_scale = _all_displays[0].get("retina_scale", 1.0)
@@ -638,19 +647,19 @@ def _populate_capture_list(prop):
 
 
 def _get_filter_crop(source):
-    """Sum the enabled Crop/Pad filters' offsets on *source*.
+    """Sum the enabled Crop/Pad filters' origin offsets on *source*.
 
     Iterates the source's filter list via ``obs_source_backup_filters``
     (avoids the broken callback-based ``obs_source_enum_filters``).
 
-    Returns ``(left, top, right, bottom)``.  Left/top include both relative
-    and absolute crops; right/bottom total only explicit relative edge
-    settings, not the output-size changes from absolute crops.  Coordinate
-    mapping uses left/top; OBS supplies the filtered output dimensions.
+    Returns ``(left, top)``: the combined shift of the filtered output's
+    origin from both relative and absolute crops.  Right/bottom edges only
+    change the output size, which OBS reports through the source dimensions,
+    so they are not part of this contract.
     """
     import json
     filters = obs.obs_source_backup_filters(source)
-    left = top = right = bottom = 0
+    left = top = 0
     try:
         count = obs.obs_data_array_count(filters)
         for i in range(count):
@@ -667,12 +676,9 @@ def _get_filter_crop(source):
             settings = fobj.get("settings", {})
             left += settings.get("left", 0)
             top += settings.get("top", 0)
-            if settings.get("relative", True):
-                right += settings.get("right", 0)
-                bottom += settings.get("bottom", 0)
     finally:
         obs.obs_data_array_release(filters)
-    return (left, top, right, bottom)
+    return (left, top)
 
 
 def _display_uuid_via_ctypes(display_id):
@@ -845,6 +851,15 @@ def _resolve_display_for_source(source_name):
         obs.obs_data_release(settings)
         obs.obs_source_release(source)
 
+    # Guessing between monitors is never done, but a Display Capture can
+    # only record the single display we know about.  This keeps indicators
+    # working when identifiers cannot be matched (unknown macOS UUID, legacy
+    # settings, or Linux without RandR 1.5 active-monitor detection).
+    if len(_all_displays) == 1 and src_id.startswith(_DISPLAY_CAPTURE_PREFIXES):
+        obs.script_log(obs.LOG_INFO,
+                       f"Click Pop: {source_name!r} not matched to a display "
+                       "ID; using the only known display")
+        return _all_displays[0]
     return None
 
 
@@ -946,7 +961,7 @@ def _get_source_crop_offset(source):
         top = obs.obs_data_get_int(settings, "cut_top")
     finally:
         obs.obs_data_release(settings)
-    filter_left, filter_top, _, _ = _get_filter_crop(source)
+    filter_left, filter_top = _get_filter_crop(source)
     return left + filter_left, top + filter_top
 
 
@@ -985,10 +1000,10 @@ def _get_bounds_crop_offset(source, crop, state):
     diff_y = bounds_h - height * abs(scale_y)
     if diff_x < -0.1:
         diff, scale = diff_x, scale_x
-        low, high = obs.OBS_ALIGN_LEFT, obs.OBS_ALIGN_RIGHT
+        low, high = _ALIGN_LEFT, _ALIGN_RIGHT
     elif diff_y < -0.1:
         diff, scale = diff_y, scale_y
-        low, high = obs.OBS_ALIGN_TOP, obs.OBS_ALIGN_BOTTOM
+        low, high = _ALIGN_TOP, _ALIGN_BOTTOM
     else:
         return 0, 0
 
@@ -1042,6 +1057,29 @@ def _get_capture_transform(scene, source_name=None):
 
     return {"crop_left": crop_left, "crop_top": crop_top,
             "capture_transform": transform}
+
+
+def _cached_capture_transform(scene_src, scene, source_name=None):
+    """Return the capture mapping, reusing a recent scene walk.
+
+    Each lookup snapshots the scene and reads settings/filters per group
+    level on the frontend thread.  A short-lived cache keyed by scene and
+    capture name makes click bursts cost one walk, while transform edits
+    still take effect within ``_TRANSFORM_CACHE_TTL_S``.  Refresh Displays
+    and settings changes clear it immediately.
+    """
+    key = (obs.obs_source_get_name(scene_src),
+           source_name or _settings.get("capture_source", ""))
+    now = time.monotonic()
+    cached = _transform_cache.get(key)
+    if cached is not None and now - cached[0] < _TRANSFORM_CACHE_TTL_S:
+        return cached[1]
+    transform = _get_capture_transform(scene, source_name)
+    for stale in [k for k, (t, _) in _transform_cache.items()
+                  if now - t >= _TRANSFORM_CACHE_TTL_S]:
+        del _transform_cache[stale]
+    _transform_cache[key] = (now, transform)
+    return transform
 
 
 # ---------------------------------------------------------------------------
@@ -1114,7 +1152,7 @@ def _spawn_circle(x, y, is_left, expire_time):
         scene = obs.obs_scene_from_source(scene_src)
         if scene is None:
             return
-        transform = _get_capture_transform(scene, capture_source_name)
+        transform = _cached_capture_transform(scene_src, scene, capture_source_name)
         if transform is None and (capture_source_name or selected not in ("", "(none)")):
             return
 

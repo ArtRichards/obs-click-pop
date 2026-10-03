@@ -116,12 +116,45 @@ def test_capture_source_matches_id_not_display_list_position(linux_script, xrand
     assert (display["x"], display["y"]) == (1920, 0)
 
 
-def test_detection_fallback_is_not_treated_as_verified_screen_zero(linux_script, xrandr):
+def test_detection_fallback_is_used_only_as_the_single_known_display(linux_script, xrandr):
+    # Without RandR 1.5 the synthetic display has no obs_screen to match,
+    # but with exactly one display known there is nothing else to capture.
     xrandr.side_effect = FileNotFoundError("xrandr is not installed")
     linux_script._all_displays = linux_script._detect_all_displays()
     linux_script.obs.obs_source_get_settings.return_value = {"screen": 0}
 
-    assert linux_script._resolve_display_for_source("Display Capture") is None
+    display = linux_script._resolve_display_for_source("Display Capture")
+
+    assert display is linux_script._all_displays[0]
+    assert "obs_screen" not in display
+
+
+@pytest.mark.parametrize("screen", [0, 3])
+def test_single_active_monitor_resolves_any_screen_id(linux_script, xrandr, screen):
+    xrandr.return_value = "Monitors: 1\n 0: +*DP-1 2560/697x1440/392+0+0  DP-1\n"
+    linux_script._all_displays = linux_script._detect_displays_linux()
+    linux_script.obs.obs_source_get_settings.return_value = {"screen": screen}
+
+    display = linux_script._resolve_display_for_source("Display Capture")
+
+    assert (display["w"], display["h"]) == (2560, 1440)
+
+
+def test_single_display_fallback_requires_a_display_capture(linux_script, xrandr):
+    xrandr.return_value = "Monitors: 1\n 0: +*DP-1 2560/697x1440/392+0+0  DP-1\n"
+    linux_script._all_displays = linux_script._detect_displays_linux()
+    linux_script.obs.obs_source_get_unversioned_id.return_value = "xcomposite_input"
+    linux_script.obs.obs_source_get_settings.return_value = {}
+
+    assert linux_script._resolve_display_for_source("Window Capture") is None
+
+
+def test_single_display_fallback_requires_an_existing_source(linux_script, xrandr):
+    xrandr.return_value = "Monitors: 1\n 0: +*DP-1 2560/697x1440/392+0+0  DP-1\n"
+    linux_script._all_displays = linux_script._detect_displays_linux()
+    linux_script.obs.obs_get_source_by_name.return_value = None
+
+    assert linux_script._resolve_display_for_source("Missing capture") is None
 
 
 @pytest.mark.parametrize("screen", [-1, 99])

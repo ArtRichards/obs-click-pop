@@ -188,6 +188,69 @@ def test_missing_selected_capture_does_not_guess_or_evict_circles(
     mock_obs.obs_source_release.assert_called_once_with(mock_obs._scene_source)
 
 
+def test_click_bursts_reuse_one_capture_transform_lookup(pipeline, monkeypatch):
+    pipeline._all_displays = SINGLE
+    pipeline._captured_display = SINGLE[0]
+    pipeline._settings["capture_source"] = "Capture"
+    pipeline._get_capture_transform.return_value = {
+        "capture_transform": (0.5, 0, 0, 0.5, 100, 50),
+    }
+    clock = [1000.0]
+    monkeypatch.setattr(pipeline.time, "monotonic", lambda: clock[0])
+
+    pipeline._spawn_circle(480, 270, True, 999)
+    clock[0] += pipeline._TRANSFORM_CACHE_TTL_S / 2
+    pipeline._spawn_circle(960, 540, False, 999)
+    assert pipeline._get_capture_transform.call_count == 1
+    _, _, left, top, size = pipeline._show_source.call_args.args
+    assert (left + size / 2, top + size / 2) == (580, 320)
+
+    clock[0] += pipeline._TRANSFORM_CACHE_TTL_S
+    pipeline._spawn_circle(480, 270, True, 999)
+    assert pipeline._get_capture_transform.call_count == 2
+
+
+def test_capture_transform_cache_is_keyed_by_scene_and_capture(
+        pipeline, mock_obs, monkeypatch):
+    pipeline._all_displays = DUAL_IDENTICAL
+    pipeline._multi_capture_mode = True
+    pipeline._settings["capture_source"] = pipeline._ALL_CAPTURES_LABEL
+    pipeline._display_capture_map = {
+        display["id"]: {"display": display, "source_name": f"Capture {display['id']}"}
+        for display in DUAL_IDENTICAL
+    }
+    pipeline._get_capture_transform.return_value = {"capture_transform": (1, 0, 0, 1, 0, 0)}
+    monkeypatch.setattr(pipeline.time, "monotonic", lambda: 1000.0)
+    scene_names = iter(["Scene A", "Scene A", "Scene A", "Scene B"])
+    mock_obs.obs_source_get_name.side_effect = lambda source: next(scene_names)
+
+    first = f"Capture {DUAL_IDENTICAL[0]['id']}"
+    second = f"Capture {DUAL_IDENTICAL[1]['id']}"
+    pipeline._spawn_circle(100, 100, True, 999)   # Scene A, first monitor
+    pipeline._spawn_circle(2000, 100, True, 999)  # Scene A, second monitor
+    pipeline._spawn_circle(100, 100, True, 999)   # Scene A, first (cached)
+    pipeline._spawn_circle(100, 100, True, 999)   # Scene B, first (new scene)
+
+    assert [c.args[1] for c in pipeline._get_capture_transform.call_args_list] == [
+        first, second, first,
+    ]
+
+
+def test_refresh_displays_clears_capture_transform_cache(pipeline, monkeypatch):
+    pipeline._all_displays = SINGLE
+    pipeline._captured_display = SINGLE[0]
+    pipeline._settings["capture_source"] = "Capture"
+    pipeline._get_capture_transform.return_value = {"capture_transform": (1, 0, 0, 1, 0, 0)}
+    monkeypatch.setattr(pipeline, "_detect_all_displays", lambda: SINGLE)
+    monkeypatch.setattr(pipeline, "_resolve_display_for_source", lambda name: SINGLE[0])
+
+    pipeline._spawn_circle(480, 270, True, 999)
+    pipeline._refresh_displays()
+    pipeline._spawn_circle(480, 270, True, 999)
+
+    assert pipeline._get_capture_transform.call_count == 2
+
+
 def test_no_current_scene_does_not_allocate_a_circle(pipeline, mock_obs):
     mock_obs.obs_frontend_get_current_scene.return_value = None
     pipeline._spawn_circle(100, 200, True, 999)

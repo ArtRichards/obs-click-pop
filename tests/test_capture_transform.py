@@ -18,7 +18,7 @@ class Scene:
 
 class Item:
     def __init__(self, scene, name, affine=IDENTITY, *, group=None,
-                 crop=(0, 0, 0, 0), filters=(0, 0, 0, 0), settings=None,
+                 crop=(0, 0, 0, 0), filters=(0, 0), settings=None,
                  size=(200, 100), state=None):
         self.id = len(scene.items) + 1
         self.name = name
@@ -54,10 +54,10 @@ def graph(obs_script, mock_obs, monkeypatch):
         "SCALE_TO_WIDTH", "SCALE_TO_HEIGHT", "MAX_ONLY",
     )):
         setattr(mock_obs, "OBS_BOUNDS_" + suffix, index)
-    mock_obs.OBS_ALIGN_LEFT = 1
-    mock_obs.OBS_ALIGN_RIGHT = 2
-    mock_obs.OBS_ALIGN_TOP = 4
-    mock_obs.OBS_ALIGN_BOTTOM = 8
+    # The script reads these bits at import, when the mock had no values.
+    for bit, name in enumerate(("LEFT", "RIGHT", "TOP", "BOTTOM")):
+        setattr(mock_obs, "OBS_ALIGN_" + name, 1 << bit)
+        monkeypatch.setattr(obs_script, "_ALIGN_" + name, 1 << bit)
 
     def snapshot(scene):
         groups = []
@@ -151,7 +151,7 @@ def test_capture_uses_native_draw_transform(obs_script, mock_obs, graph, affine)
 def test_source_and_item_crops_are_applied_once(obs_script, graph):
     scene, _ = graph
     Item(scene, "Capture", (0.5, 0, 0, 2, 200, 300),
-         settings={"cut_left": 100, "cut_top": 50}, filters=(20, 10, 0, 0),
+         settings={"cut_left": 100, "cut_top": 50}, filters=(20, 10),
          crop=(30, 40, 0, 0))
 
     mapping = obs_script._get_capture_transform(scene, "Capture")
@@ -189,7 +189,7 @@ def test_group_filter_and_item_crops_follow_child_transform(obs_script, graph):
     scene, _ = graph
     group = Scene("Group")
     Item(scene, "Group", (0.5, 0, 0, 0.5, 100, 200), group=group,
-         filters=(7, 11, 0, 0), crop=(5, 6, 0, 0))
+         filters=(7, 11), crop=(5, 6, 0, 0))
     Item(group, "Capture", (1, 0, 0, 1, 40, 50), crop=(10, 20, 0, 0))
 
     mapping = obs_script._get_capture_transform(scene, "Capture")
@@ -330,7 +330,7 @@ def test_spawn_circle_uses_real_grouped_capture_mapping(
     group = Scene("Group")
     Item(scene, "Group", (0.5, 0, 0, 0.5, 100, 50), group=group)
     Item(group, "Capture", settings={"cut_left": 100, "cut_top": 50},
-         filters=(20, 10, 0, 0), crop=(10, 20, 0, 0))
+         filters=(20, 10), crop=(10, 20, 0, 0))
     display = {"id": 7, "x": 1920, "y": 0, "w": 1920, "h": 1080,
                "retina_scale": 1.0}
     obs_script._all_displays = [display]

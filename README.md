@@ -90,11 +90,15 @@ After updating the Python files, restart OBS so both the main script and its
 
 ### Cropped Display Capture
 
+> **Changed behavior:** with the **Display Capture source** left blank or set to **(none)**, earlier versions scaled the *whole multi-monitor desktop* onto the canvas. Now the *clicked monitor* is mapped to the full canvas. If you relied on the old whole-desktop mapping, select your capture source (or **(all - auto detect)**) instead.
+
 If your Display Capture source is cropped to a sub-region of your screen, select it from the **Display Capture source** dropdown. The script reads crop offsets and scale from the source properties, scene-item transform, and any Crop/Pad filters to map mouse coordinates correctly.
 
-Disabled Crop/Pad filters are ignored; multiple enabled crop filters are combined.
+Disabled Crop/Pad filters are ignored; multiple enabled crop filters are combined. **Crop to Bounding Box** (OBS 30.1 and later) is honored; older OBS versions have no such option, so nothing is lost there.
 
-Leaving the selection blank or choosing **(none)** uses a simpler fallback: it maps the clicked monitor to the full canvas. It does **not** map the entire multi-monitor desktop or account for a capture's crop, position, or aspect-ratio padding. Select a capture for those adjustments. If a selected capture is absent from the current scene or its monitor cannot be identified, indicators are skipped instead of placed using a guessed origin or transform.
+Leaving the selection blank or choosing **(none)** uses a simpler fallback: it maps the clicked monitor to the full canvas. It does **not** map the entire multi-monitor desktop or account for a capture's crop, position, or aspect-ratio padding. Select a capture for those adjustments. If a selected capture is absent from the current scene, indicators are skipped instead of placed using a guessed transform. If its monitor cannot be identified, clicks are skipped on multi-monitor setups; with exactly one display detected, that display is assumed.
+
+The capture's transform is re-read at most once per second while you click, so moving, scaling, or cropping the capture takes effect within a second without a restart.
 
 
 ## Customization
@@ -128,6 +132,7 @@ On Linux, automatic monitor matching requires `xrandr --listactivemonitors` (Ran
 - No drag visualization (only click points)
 - Circle appears at click position instantly (no fade-in/fade-out animation)
 - Geometry-changing source filters other than Crop/Pad (for example, Scale/Aspect Ratio) are not mapped. Scene-item and group transforms are supported.
+- Crop to Bounding Box offsets require OBS 30.1+, where the option exists; the transform snapshot of earlier versions has no such field.
 
 
 ## How It Works
@@ -153,6 +158,13 @@ python -m venv .venv
 The test suite includes:
 - **Tier 1** — Pure logic tests (coordinate mapping, slot allocation, circle expiration)
 - **Tier 2** — Mock OBS integration tests (the click-to-canvas pipeline, monitor matching, crop filters, group transforms, ref management, visibility)
+- **Native** — Marked `@pytest.mark.native`, deselected by default. These start headless libobs through the installed `obspython` bindings and compare the script's transform composition against real scene items, groups, crops, bounds modes and `vec3_transform`. Run them with:
+
+  ```bash
+  OBS_SCRIPTING_DIR=/usr/lib/x86_64-linux-gnu/obs-scripting .venv/bin/pytest -m native -v
+  ```
+
+  `OBS_SCRIPTING_DIR` is the directory holding `obspython.py` and `_obspython.so` (the Linux default above is tried automatically). Cases that need Crop to Bounding Box skip on libobs builds older than 30.1.
 - **E2E stubs** — Marked `@pytest.mark.e2e`, skipped by default (require a running OBS instance)
 
 

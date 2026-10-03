@@ -81,10 +81,10 @@ def test_map_coords(x, y, canvas_w, canvas_h, monitor_w, monitor_h, size, expect
 def test_map_coords_cropped(x, y, canvas_w, canvas_h, monitor_w, monitor_h, size,
                             crop_left, crop_top, pos_x, pos_y, scale_x, scale_y,
                             expected):
+    # A positioned, scaled capture is the affine (sx, 0, 0, sy, px, py).
     result = map_coords(x, y, canvas_w, canvas_h, monitor_w, monitor_h, size,
                         crop_left=crop_left, crop_top=crop_top,
-                        capture_pos_x=pos_x, capture_pos_y=pos_y,
-                        capture_scale_x=scale_x, capture_scale_y=scale_y)
+                        capture_transform=(scale_x, 0, 0, scale_y, pos_x, pos_y))
     assert result == pytest.approx(expected)
 
 

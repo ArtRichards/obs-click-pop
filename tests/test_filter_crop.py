@@ -24,31 +24,31 @@ def _set_filters(mock_obs, entries):
 @pytest.mark.parametrize(
     "entries, expected",
     [
-        ([], (0, 0, 0, 0)),
-        ([None], (0, 0, 0, 0)),
-        ([{"id": "crop_filter"}], (0, 0, 0, 0)),
+        ([], (0, 0)),
+        ([None], (0, 0)),
+        ([{"id": "crop_filter"}], (0, 0)),
         ([{
             "id": "crop_filter",
             "settings": {"left": 100, "top": 50, "right": 20, "bottom": 10},
-        }], (100, 50, 20, 10)),
+        }], (100, 50)),
         ([{
             "id": "crop_filter", "enabled": False,
             "settings": {"left": 100, "top": 50, "right": 20, "bottom": 10},
-        }], (0, 0, 0, 0)),
+        }], (0, 0)),
         ([{
             "id": "crop_filter", "enabled": False,
             "settings": {"left": 100, "top": 50},
         }, {
             "id": "crop_filter", "enabled": True,
             "settings": {"left": 20, "top": 10},
-        }], (20, 10, 0, 0)),
+        }], (20, 10)),
         ([{
             "id": "crop_filter", "enabled": True,
             "settings": {"left": 100, "top": 50, "right": 20, "bottom": 10},
         }, {
             "id": "crop_filter", "enabled": True,
             "settings": {"left": 20, "top": 10, "right": 4, "bottom": 2},
-        }], (120, 60, 24, 12)),
+        }], (120, 60)),
         ([{
             "id": "color_filter", "enabled": True,
             "settings": {"left": 999, "top": 999},
@@ -61,14 +61,14 @@ def _set_filters(mock_obs, entries):
         }, {
             "id": "crop_filter",
             "settings": {"left": 20, "top": 10},
-        }], (120, 60, 0, 0)),
+        }], (120, 60)),
         ([{
             "id": "crop_filter",
             "settings": {"left": 100, "top": 50, "right": 20, "bottom": 10},
         }, {
             "id": "crop_filter",
             "settings": {"left": -20, "top": -10, "right": -4, "bottom": -2},
-        }], (80, 40, 16, 8)),
+        }], (80, 40)),
     ],
     ids=[
         "no_filters", "empty_record", "default_settings", "default_enabled",
@@ -97,8 +97,8 @@ def test_absolute_crop_keeps_origin_offsets(obs_script, mock_obs):
         "settings": {"left": 20, "top": 10, "right": 4, "bottom": 2},
     }])
 
-    # Absolute mode uses cx/cy, not saved (possibly stale) right/bottom.
-    assert obs_script._get_filter_crop(object()) == (120, 60, 4, 2)
+    # Absolute mode still shifts the origin; output size comes from OBS.
+    assert obs_script._get_filter_crop(object()) == (120, 60)
 
 
 @pytest.mark.parametrize("failure", ["read_json", "parse_json", "count_records"])

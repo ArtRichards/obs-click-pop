@@ -10,16 +10,15 @@ def find_display_for_point(x, y, displays):
 
 
 def map_coords(x, y, canvas_w, canvas_h, monitor_w, monitor_h, circle_size,
-               crop_left=0, crop_top=0, capture_pos_x=0, capture_pos_y=0,
-               capture_scale_x=None, capture_scale_y=None,
-               capture_transform=None):
+               crop_left=0, crop_top=0, capture_transform=None):
     """Map mouse coordinates to OBS canvas coordinates, centered on the circle.
 
     *capture_transform* is an affine tuple ``(xx, xy, yx, yy, tx, ty)``
-    mapping cropped source pixels into canvas space, including any groups.
-    Otherwise, use explicit position/scale or proportional mapping across
-    one full monitor.  Center the indicator only after the transformation
-    so its diameter stays in canvas pixels.
+    mapping cropped source pixels into canvas space, including any groups;
+    a plain position/scale is expressed as ``(sx, 0, 0, sy, px, py)``.
+    Without it, map one full monitor proportionally onto the canvas.  Center
+    the indicator only after the transformation so its diameter stays in
+    canvas pixels.
 
     Returns (obs_x, obs_y).
     """
@@ -30,12 +29,8 @@ def map_coords(x, y, canvas_w, canvas_h, monitor_w, monitor_h, circle_size,
         obs_x = xx * cropped_x + xy * cropped_y + tx
         obs_y = yx * cropped_x + yy * cropped_y + ty
     else:
-        if capture_scale_x is None:
-            capture_scale_x = canvas_w / monitor_w
-        if capture_scale_y is None:
-            capture_scale_y = canvas_h / monitor_h
-        obs_x = capture_pos_x + cropped_x * capture_scale_x
-        obs_y = capture_pos_y + cropped_y * capture_scale_y
+        obs_x = cropped_x * canvas_w / monitor_w
+        obs_y = cropped_y * canvas_h / monitor_h
     return (obs_x - circle_size / 2, obs_y - circle_size / 2)
 
 

@@ -154,6 +154,7 @@ def obs_script(mock_obs):
     obs_click_pop._active_clicks.clear()
     obs_click_pop._display_capture_map = {}
     obs_click_pop._multi_capture_mode = False
+    obs_click_pop._transform_cache.clear()
 
     yield obs_click_pop
 
